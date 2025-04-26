@@ -1,6 +1,7 @@
 name: Container Build CICD
 
 on:
+  workflow_dispatch:
   push:
     branches:
     - 'main'
@@ -10,7 +11,7 @@ on:
 # Be sure to update the lines below to match YOUR GitHub account name / your container image name.
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: uvasds-systems/docker-iss
+  IMAGE_NAME: justinyang597/iss-demo
   IMAGE_TAG: 1.${{ github.run_number }} # GITHUB_RUN_NUMBER }}
 
 jobs:
