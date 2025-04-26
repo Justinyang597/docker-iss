@@ -1,78 +1,91 @@
 import requests
-import json
 import datetime
 import logging
 import os
+import sys
 from pymongo import MongoClient
 
 """
-    This script is used to get the current location of the ISS from the Open Notify API 
-      and write it to a MongoDB database.
-    The script is containerized and can be run anywhere.
-    Note that (a) an entrypoint function is defined in this script, and that (b) error handling
-      and (c) logging are implemented.
-
-    YOU MUST update two things before running this script:
-    1. Populate a MONGOPASS environment variable with your MongoDB password (see Canvas).
-    2. Update the db name to your UVA computing ID on line 68.
+    This script fetches the current ISS location and writes it to MongoDB.
+    Updates made:
+      - HTTP status checking
+      - Renamed `long`/`lat` to `longitude`/`latitude`
+      - Improved error handling and exit codes
+      - DB name updated to UVA computing ID: pxr6gr
+      - Optional MONGO_DB_NAME env var support
 """
 
-# logging config
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configuration
+API_URL = "http://api.open-notify.org/iss-now.json"
+DB_NAME = os.getenv("MONGO_DB_NAME", "pxr6gr")  # Set your UVA computing ID here or via env var
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-# core fcn
+
 def get_iss_location():
-    url = "http://api.open-notify.org/iss-now.json"
+    """Fetch ISS location from the public API and return formatted data."""
     try:
-        response = requests.get(url)
-        r = response.json()
+        response = requests.get(API_URL, timeout=10)
+        response.raise_for_status()
+        data = response.json()
 
-        # fetch values from response
-        timestamp = r['timestamp']
-        # convert timestamp to human readable date and time (out of epoch)
+        # Extract and format
+        timestamp = data.get("timestamp")
         dt_obj = datetime.datetime.fromtimestamp(timestamp)
-        dtime = dt_obj.strftime('%Y-%m-%d-%H:%M:%S')
+        human_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
 
-        # get longitude and latitude
-        long = r['iss_position']['longitude']
-        lat = r['iss_position']['latitude']
+        longitude = data["iss_position"]["longitude"]
+        latitude = data["iss_position"]["latitude"]
 
-        # log output for visibility
-        logger.info("Timestamp: " + dtime)
-        logger.info("Longitude: " + long)
-        logger.info("Latitude: " + lat)
+        logger.info(f"Timestamp: {human_time}")
+        logger.info(f"Longitude: {longitude}")
+        logger.info(f"Latitude: {latitude}")
 
-        # write output to mongo db
-        write_to_mongo(dtime, long, lat)
+        return human_time, longitude, latitude
 
-    except Exception as e:
-        logger.error(e)
-        exit(1)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"HTTP error when fetching ISS location: {e}")
+        sys.exit(1)
+    except (KeyError, ValueError) as e:
+        logger.error(f"Error parsing response: {e}")
+        sys.exit(1)
 
-# db utility fcn
-def write_to_mongo(dtime, long, lat):
-    # write output to mongo db
+
+def write_to_mongo(timestamp, longitude, latitude):
+    """Write the ISS data into MongoDB collection 'locations'."""
+    db_pass = os.getenv("MONGOPASS")
+    if not db_pass:
+        logger.error("MONGOPASS environment variable is not set.")
+        sys.exit(1)
+
+    uri = (
+        f"mongodb+srv://docker:{db_pass}@cluster0.m3fek.mongodb.net/"
+        f"{DB_NAME}?retryWrites=true&w=majority"
+    )
+
     try:
-        # use an ENV variable for the password
-        dbpass = os.getenv('MONGOPASS')
-        if not dbpass:
-            raise ValueError("MONGOPASS environment variable is not set")
-            logging.error("MONGOPASS environment variable is not set")
-            exit(1)
-            
-        connection_string = f'mongodb+srv://docker:{dbpass}@cluster0.m3fek.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0'
-        client = MongoClient(connection_string)
+        client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        client.server_info()  # trigger connection exception if cannot connect
 
-        # use your UVA computing ID for the database name
-        db = client['mst3k']
-        collection = db['locations']
-        collection.insert_one({'timestamp': dtime, 'longitude': long, 'latitude': lat})
-        logger.info('Output written to MongoDB')
+        db = client[DB_NAME]
+        collection = db["locations"]
+        collection.insert_one({
+            "fetched_at": timestamp,
+            "longitude": longitude,
+            "latitude": latitude,
+        })
+        logger.info("Output written to MongoDB")
+
     except Exception as e:
-        logger.error(e)
-        exit(1)
+        logger.error(f"MongoDB write failed: {e}")
+        sys.exit(1)
 
-# entrypoint fcn
+
 if __name__ == "__main__":
-    get_iss_location()
+    ts, lon, lat = get_iss_location()
+    write_to_mongo(ts, lon, lat)
